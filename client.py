@@ -7,13 +7,34 @@ import struct
 import requests
 import time
 import json
+import pickle
+import traceback
+import threading
 
-from valorlib.Packets.Packet import *
-from RC4 import RC4
+from valorlib.Packets.Packet import *	
+from valorlib.Packets.DataStructures import *	
+from valorlib.RC4 import RC4
+# secret modules
+from KBXNHFGMDQYA import *
+from QJNGALCFKWDP import *
+from WZYBFIPQLMOH import *
+from AFK import *
+
+class ObjectInfo:
+
+	def __init__(self):
+		self.pos = WorldPosData()
+		self.objectType = 0
+
+	def PrintString(self):
+		self.pos.PrintString()
+		print("objectType", self.objectType)
 
 class Client:
 
-	def __init__(self):
+	def __init__(self, names: dict):
+
+		# static stuff
 		self.publicKey = rsa.PublicKey.load_pkcs1_openssl_pem(b"-----BEGIN PUBLIC KEY-----\nMFswDQYJKoZIhvcNAQEBBQADSgAwRwJAeyjMOLhcK4o2AnFRhn8vPteUy5Fux/cXN/J+wT/zYIEUINo02frn+Kyxx0RIXJ3CvaHkwmueVL8ytfqo8Ol/OwIDAQAB\n-----END PUBLIC KEY-----")
 		self.remoteHostAddr = "51.222.11.213"
 		self.remoteHostPort = 2050
@@ -28,20 +49,42 @@ class Client:
 		}
 		self.email = None
 		self.password = None
-
-		self.buildVersion = "3.2.2"
+		self.buildVersion = "3.3.2"
+		self.loginToken = b""
 		self.serverSocket = None
-
-		# state consistency
-		self.charID = None
-		self.objectID = None
-		self.charID = None
+		
+		# modules + internal variables
+		self.moduleName = "none"
+		self.module = None
+		self.enemyName = names
 		self.reconnecting = False
 		self.connected = False
+		self.blockLoad = False
+		self.justConnected = False
+
+		# state consistency
+		self.gameIDs = {
+			1 : "Realm",
+			-1 : "Nexus",
+			-2 : "Nexus",
+			-5 : "Vault",
+			-15 : "Marketplace",
+			-16 : "Ascension Enclave",
+			-17 : "Aspect Hall"
+		}
+		self.currentMap = None
+		self.charID = None
+		self.objectID = None
+		self.newObjects = {}
+		self.oryx = False
+		self.nextGameID = -1
+		self.nextKeyTime = 0
+		self.nextKey = []
+		self.latestQuest = None
+		self.questSwitch = False
 
 		# this is in milliseconds
 		self.clientStartTime = int(time.time() * 1000)
-
 		self.ignoreIn = []
 		"""
 		self.ignoreIn = [
@@ -62,19 +105,38 @@ class Client:
 		self.serverSocket.connect((self.remoteHostAddr, self.remoteHostPort))
 		self.connected = True
 		
-
 	# send hello packet
-	def fireHelloPacket(self):
+	def fireHelloPacket(self, useReconnect):
 		p = Hello()
-		p.buildVersion = self.buildVersion
-		p.gameID = -1
-		p.guid = self.encryptString(self.email)
-		p.password = self.encryptString(self.password)
-		p.secret = ""
-		p.keyTime = -1
-		p.key = []
-		p.mapJSON = ""
-		p.cliBytes = 0
+
+		if not useReconnect:
+			p.buildVersion = self.buildVersion
+			p.gameID = -1
+			p.guid = self.encryptString(self.email)
+			p.loginToken = self.encryptString(self.loginToken)
+			p.keyTime = -1
+			p.key = []
+			p.mapJSON = ""
+			p.cliBytes = 0
+			self.currentMap = 'Nexus'
+		else:
+			p.buildVersion = self.buildVersion
+			p.gameID = self.nextGameID
+			self.currentMap = self.gameIDs[p.gameID]
+			p.guid = self.encryptString(self.email)
+			p.loginToken = self.encryptString(self.loginToken)
+			p.keyTime = self.nextKeyTime
+			p.key = self.nextKey
+			p.mapJSON = ""
+			p.cliBytes = 0
+
+		# after sending hello, reset states (since keys have expired)
+		self.nextGameID = -1
+		self.nextKeyTime = 0
+		self.nextKey = []
+
+		self.justConnected = True
+		
 		self.SendPacketToServer(CreatePacket(p))
 
 	def fireLoadPacket(self):
@@ -91,14 +153,12 @@ class Client:
 
 		header = self.serverSocket.recv(5)
 
-		# this happens every 30 seconds lmfao
-		# i remember this strange packet causing me a 2 month blocker period.
-		# if len(header) == 0:
-		#	return
+		if len(header) == 0:
+			print("server sent 0")
+			self.reset()
 		
 		# if the server sent nothing, keep trying until we recieve 5 bytes
 		while len(header) != 5:
-			print(":(", len(header))
 			header += self.serverSocket.recv(5 - len(header))
 
 		packetID = header[4]
@@ -130,6 +190,11 @@ class Client:
 			# capture our object ID, necessary to send many types of packets like invswap or buy
 			self.onCreateSuccess(packet)
 
+		elif packet.ID == PacketTypes.Goto:
+			p = GotoAck()
+			p.time = self.time()
+			self.SendPacketToServer(CreatePacket(p))
+
 		# keep-alive functions
 		elif packet.ID == PacketTypes.Ping:
 			p = Ping()
@@ -138,6 +203,28 @@ class Client:
 			reply.serial = p.serial
 			reply.time = self.time()
 			self.SendPacketToServer(CreatePacket(reply))
+
+		elif packet.ID == PacketTypes.Update:
+
+			p = UpdateAck()
+			self.SendPacketToServer(CreatePacket(p))
+
+			p = Update()
+			p.read(packet.data)
+			for i in p.newObjects:
+				obj = ObjectInfo()
+				obj.pos = i.objectStatusData.pos
+				obj.objectType = i.objectType
+				self.newObjects.update({i.objectStatusData.objectID : obj})
+
+		elif packet.ID == PacketTypes.Text:
+			p = Text()
+			p.read(packet.data)
+			# print out messages not from sidon or errors
+			if p.name != "" and p.name != '#Sidon the Dark Elder' and p.name != "*Error*":
+				print(p.name + ": "  + p.text)
+			if p.name == '#Sidon the Dark Elder' and 'CLOSED THIS' in p.text:
+				self.oryx = True
 
 		elif packet.ID == PacketTypes.QueuePing:
 			p = QueuePing()
@@ -157,11 +244,20 @@ class Client:
 			# then, fire Load packet
 			self.fireLoadPacket()
 
+		elif packet.ID == PacketTypes.QuestObjId:
+			p = QuestObjId()
+			p.read(packet.data)
+			self.questSwitch = True
+			self.latestQuest = p.objectID
+
 		elif packet.ID == PacketTypes.Reconnect:
 			# update map name.
 			p = Reconnect()
 			p.read(packet.data)
-			self.currentMap = p.name
+			
+			self.nextGameID = p.gameID
+			self.nextKeyTime = p.keyTime
+			self.nextKey = p.key
 			self.reconnecting = True
 
 		elif packet.ID == PacketTypes.Failure:
@@ -170,21 +266,126 @@ class Client:
 			p.PrintString()
 			raise Exception("Got failure from server. Aborting")
 
-	# main loop!
-	def mainLoop(self):
+	# create a wizzy
+	def Create(self):
+		p = Create()
+		p.classType = 782
+		p.skinType = 0
+		self.SendPacketToServer(CreatePacket(p))
+
+
+	def reset(self):
+		self.resetStates()
+		self.clientReceiveKey.reset()
+		self.serverRecieveKey.reset()
+		self.serverSocket = None
+		self.gameSocket = None
+		
 		# first, connect to remote
 		self.connect()
-		# then, fire the hello packet
-		self.fireHelloPacket()
+		
+		# then, fire the hello packet, connect to new map
+		self.fireHelloPacket(True)		
+		self.clientStartTime = int(time.time() * 1000)
+
+	def resetStates(self):
+		self.connected = False
+		self.justConnected = False
+		self.clientReceiveKey.reset()
+		self.serverRecieveKey.reset()
+		self.charID = None
+		self.objectID = None
+		self.newObjects = {}
+		self.oryx = False
+		self.latestQuest = None
+		self.clientStartTime = int(time.time() * 1000)
+
+
+	def onReconnect(self):
+		#time.sleep(random.randint(1, 7))
+		self.Disconnect()
+		self.resetStates()
+		self.connect()
+		self.fireHelloPacket(True)
+
+
+		# load or create:
+		if self.charID is None:
+			self.charID = self.getRandomCharID()
+
+		if self.charID == -1:
+			self.blockLoad = True
+			self.Create()
+
+	def Disconnect(self):
+		self.connected = False
+		if self.serverSocket:
+			self.serverSocket.shutdown(socket.SHUT_RD)
+			self.serverSocket.close()
+		self.gameSocket = None
+
+
+	# main loop!
+	def mainLoop(self):
+
+		# post to acc/verify
+		self.accountVerify()
+
+		# first, connect to remote
+		self.connect()
+		# then, fire the hello packet, connect to nexus.
+		self.fireHelloPacket(False)
+
+		# load or create:
+		if self.charID is None:
+			self.charID = self.getRandomCharID()
+
+		# if no character exists
+		if self.charID == -1:
+			self.blockLoad = True
+			self.Create()
 
 		print("Connected to server!")
 
 		# listen to packets
 		while True:
+
 			try:
+				
+				# take care of reconnect first
+				if self.reconnecting:
+
+					# flush
+					ready = select.select([self.serverSocket], [], [])[0]
+					if self.serverSocket in ready:
+						self.serverSocket.recv(20000)
+
+					self.onReconnect()
+					self.reconnecting = False
+
+				# check if there is data ready from the server
 				ready = select.select([self.serverSocket], [], [])[0]
 				if self.serverSocket in ready:
 					self.listenToServer()
+
+				# finally, run a custom module
+				#if self.moduleName != "none":
+				self.module.main(self)
+
+			except ConnectionAbortedError as e:
+				print("Connection was aborted:", e)
+				self.reset()
+
+			except ConnectionResetError as e:
+				print("Connection was reset")
+				traceback.print_exc()
+				self.reset()
+
+			except Exception as e:
+				print("Ran into exception:", e)
+				#time.sleep(5)
+				self.reset()
+
 			except KeyboardInterrupt:
 				print("Quitting.")
 				return
@@ -198,42 +399,64 @@ class Client:
 		self.serverRecieveKey.encrypt(packet.data)
 		self.serverSocket.sendall(packet.format())
 
-	def getRandomCharID(self):
+	# get loginToken
+	def accountVerify(self):
+		#print("about to post")
+		#while 1:
 		x = requests.post(
-			"http://51.222.11.213:8080/char/list",
+			"http://51.222.11.213:8080/account/verify?g={}".format(self.email),
 			headers = self.headers,
 			data = {
 				"guid" : self.email,
 				"password" : self.password,
-				"game_net_user_id" : "",
-				"game_net" : "rotmg",
-				"do_login" : "true",
-				"play_platform" : "rotmg",
+				"pin": "",
 				"ignore" : 0,
 				"gameClientVersion" : self.buildVersion
 			}
 		).content.decode("utf-8")
+		self.loginToken = bytes(re.findall("<LoginToken>(.+?)</LoginToken>", x, flags = re.I)[0], 'utf-8')
+
+	def getRandomCharID(self):
+		print("getting random char ID")
+		x = requests.post(
+			"http://51.222.11.213:8080/char/list?g={}".format(self.email),
+			headers = self.headers,
+			data = {
+				"guid" : self.email,
+				"loginToken" : self.loginToken,
+				"do_login" : "true",
+				"ignore" : 0,
+				"gameClientVersion" : self.buildVersion
+			}
+		).content.decode("utf-8")
+
+
+
 		try:
-			return int(re.findall("<char id=\"([0-9]+)\">", x, flags = re.I)[0])
+			charID = int(re.findall("<char id=\"([0-9]+)\">", x, flags = re.I)[0])
+			return charID
 		except IndexError:
 			return -1
+
+	def onCreateSuccess(self, packet):
+		p = CreateSuccess()
+		p.read(packet.data)
+		self.connected = True
+		self.objectID = p.objectID
+		self.charID = p.charID
+		print("Connected to {}!".format(self.currentMap))
 
 
 	#########
 	# hooks #
 	#########
 
-	def onCreateSuccess(self, packet):
-		p = CreateSuccess()
-		p.read(packet.data)
-		self.objectID = p.objectID
-		self.charID = p.charID
-
 	def initializeAccountDetails(self):
 		try:
 			x = json.load(open("account.json", "r"))
 			self.email = x['email'].encode("utf-8")
 			self.password = x['password'].encode("utf-8")
+			self.moduleName = x['module']
 
 			if self.email == b"" or self.password == b"":
 				raise Exception("You left your credentials blank!")
@@ -245,10 +468,31 @@ class Client:
 
 		return True
 
+	def loadModules(self):
+		if self.moduleName == "KBXNHFGMDQYA":
+			self.module = KBXNHFGMDQYA()
+		elif self.moduleName == "WZYBFIPQLMOH":
+			self.module = WZYBFIPQLMOH()
+		elif self.moduleName == "QJNGALCFKWDP":
+			self.module = QJNGALCFKWDP()
+		elif self.moduleName == "none":
+			self.module = AFK()
+
+		if self.module == None:
+			return False
+
+		return True
 
 if __name__ == "__main__":
-	c = Client()
+
+	with open("NameDictionary.pkl", "rb") as f:
+		nameDictionary = pickle.load(f)
+
+
+	c = Client(nameDictionary)
 	if not c.initializeAccountDetails():
-		print("Encountered exception. Quitting.")
+		print("Encountered exception in initializing account details. Quitting.")
+	if not c.loadModules():
+		print("No module was loaded. Quitting.")
 	else:
 		c.mainLoop()
