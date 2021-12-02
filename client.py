@@ -15,9 +15,7 @@ from valorlib.Packets.Packet import *
 from valorlib.Packets.DataStructures import *	
 from valorlib.RC4 import RC4
 # secret modules
-from KBXNHFGMDQYA import *
-from QJNGALCFKWDP import *
-from WZYBFIPQLMOH import *
+from Notifier import *
 from AFK import *
 
 class ObjectInfo:
@@ -49,9 +47,10 @@ class Client:
 		}
 		self.email = None
 		self.password = None
-		self.buildVersion = "3.3.2"
+		self.buildVersion = "3.3.5"
 		self.loginToken = b""
 		self.serverSocket = None
+		self.lastPacketTime = time.time()
 		
 		# modules + internal variables
 		self.moduleName = "none"
@@ -60,7 +59,7 @@ class Client:
 		self.reconnecting = False
 		self.connected = False
 		self.blockLoad = False
-		self.justConnected = False
+		self.helloTime = 0
 
 		# state consistency
 		self.gameIDs = {
@@ -135,7 +134,7 @@ class Client:
 		self.nextKeyTime = 0
 		self.nextKey = []
 
-		self.justConnected = True
+		self.helloTime = time.time()
 		
 		self.SendPacketToServer(CreatePacket(p))
 
@@ -226,6 +225,11 @@ class Client:
 			if p.name == '#Sidon the Dark Elder' and 'CLOSED THIS' in p.text:
 				self.oryx = True
 
+		elif packet.ID == PacketTypes.NewTick:
+			p = NewTick()
+			p.read(packet.data)
+			#p.PrintString()
+
 		elif packet.ID == PacketTypes.QueuePing:
 			p = QueuePing()
 			p.read(packet.data)
@@ -275,6 +279,7 @@ class Client:
 
 
 	def reset(self):
+		#time.sleep(1)
 		self.resetStates()
 		self.clientReceiveKey.reset()
 		self.serverRecieveKey.reset()
@@ -290,7 +295,7 @@ class Client:
 
 	def resetStates(self):
 		self.connected = False
-		self.justConnected = False
+		self.helloTime = 0
 		self.clientReceiveKey.reset()
 		self.serverRecieveKey.reset()
 		self.charID = None
@@ -351,6 +356,12 @@ class Client:
 		while True:
 
 			try:
+				#print("cur time", time.time())
+				#print("last time", self.lastPacketTime)
+				#print(time.time() - self.lastPacketTime)
+				if time.time() - self.lastPacketTime > 30:
+					print("Connection was hanging")
+					self.reset()
 				
 				# take care of reconnect first
 				if self.reconnecting:
@@ -366,6 +377,7 @@ class Client:
 				# check if there is data ready from the server
 				ready = select.select([self.serverSocket], [], [])[0]
 				if self.serverSocket in ready:
+					self.lastPacketTime = time.time()
 					self.listenToServer()
 
 				# finally, run a custom module
@@ -469,12 +481,8 @@ class Client:
 		return True
 
 	def loadModules(self):
-		if self.moduleName == "KBXNHFGMDQYA":
-			self.module = KBXNHFGMDQYA()
-		elif self.moduleName == "WZYBFIPQLMOH":
-			self.module = WZYBFIPQLMOH()
-		elif self.moduleName == "QJNGALCFKWDP":
-			self.module = QJNGALCFKWDP()
+		if self.moduleName == "notifier":
+			self.module = Notifier()
 		elif self.moduleName == "none":
 			self.module = AFK()
 
