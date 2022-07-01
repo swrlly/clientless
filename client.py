@@ -14,7 +14,9 @@ import threading
 from valorlib.Packets.Packet import *	
 from valorlib.Packets.DataStructures import *	
 from valorlib.RC4 import RC4
+from queue import Queue
 # secret modules
+from WZYBFIPQLMOH import *
 from Notifier import *
 from AFK import *
 
@@ -47,7 +49,7 @@ class Client:
 		}
 		self.email = None
 		self.password = None
-		self.buildVersion = "3.3.5"
+		self.buildVersion = "3.8.0"
 		self.loginToken = b""
 		self.serverSocket = None
 		self.lastPacketTime = time.time()
@@ -60,6 +62,7 @@ class Client:
 		self.connected = False
 		self.blockLoad = False
 		self.helloTime = 0
+		self.messageQueue = Queue()
 
 		# state consistency
 		self.gameIDs = {
@@ -128,6 +131,8 @@ class Client:
 			p.key = self.nextKey
 			p.mapJSON = ""
 			p.cliBytes = 0
+
+		p.PrintString()
 
 		# after sending hello, reset states (since keys have expired)
 		self.nextGameID = -1
@@ -219,9 +224,6 @@ class Client:
 		elif packet.ID == PacketTypes.Text:
 			p = Text()
 			p.read(packet.data)
-			# print out messages not from sidon or errors
-			if p.name != "" and p.name != '#Sidon the Dark Elder' and p.name != "*Error*":
-				print(p.name + ": "  + p.text)
 			if p.name == '#Sidon the Dark Elder' and 'CLOSED THIS' in p.text:
 				self.oryx = True
 
@@ -262,6 +264,7 @@ class Client:
 			self.nextGameID = p.gameID
 			self.nextKeyTime = p.keyTime
 			self.nextKey = p.key
+			p.PrintString()
 			self.reconnecting = True
 
 		elif packet.ID == PacketTypes.Failure:
@@ -279,7 +282,6 @@ class Client:
 
 
 	def reset(self):
-		#time.sleep(1)
 		self.resetStates()
 		self.clientReceiveKey.reset()
 		self.serverRecieveKey.reset()
@@ -298,7 +300,6 @@ class Client:
 		self.helloTime = 0
 		self.clientReceiveKey.reset()
 		self.serverRecieveKey.reset()
-		self.charID = None
 		self.objectID = None
 		self.newObjects = {}
 		self.oryx = False
@@ -307,7 +308,6 @@ class Client:
 
 
 	def onReconnect(self):
-		#time.sleep(random.randint(1, 7))
 		self.Disconnect()
 		self.resetStates()
 		self.connect()
@@ -329,7 +329,6 @@ class Client:
 			self.serverSocket.close()
 		self.gameSocket = None
 
-
 	# main loop!
 	def mainLoop(self):
 
@@ -340,6 +339,7 @@ class Client:
 		self.connect()
 		# then, fire the hello packet, connect to nexus.
 		self.fireHelloPacket(False)
+
 
 		# load or create:
 		if self.charID is None:
@@ -356,9 +356,6 @@ class Client:
 		while True:
 
 			try:
-				#print("cur time", time.time())
-				#print("last time", self.lastPacketTime)
-				#print(time.time() - self.lastPacketTime)
 				if time.time() - self.lastPacketTime > 30:
 					print("Connection was hanging")
 					self.reset()
@@ -381,7 +378,6 @@ class Client:
 					self.listenToServer()
 
 				# finally, run a custom module
-				#if self.moduleName != "none":
 				self.module.main(self)
 
 			except ConnectionAbortedError as e:
@@ -395,7 +391,6 @@ class Client:
 
 			except Exception as e:
 				print("Ran into exception:", e)
-				#time.sleep(5)
 				self.reset()
 
 			except KeyboardInterrupt:
@@ -413,10 +408,9 @@ class Client:
 
 	# get loginToken
 	def accountVerify(self):
-		#print("about to post")
-		#while 1:
+
 		x = requests.post(
-			"http://51.222.11.213:8080/account/verify?g={}".format(self.email),
+			"https://valor-prod.realmdex.com/account/verify?g={}".format(self.email),
 			headers = self.headers,
 			data = {
 				"guid" : self.email,
@@ -427,11 +421,12 @@ class Client:
 			}
 		).content.decode("utf-8")
 		self.loginToken = bytes(re.findall("<LoginToken>(.+?)</LoginToken>", x, flags = re.I)[0], 'utf-8')
+		print(self.loginToken)
 
 	def getRandomCharID(self):
 		print("getting random char ID")
 		x = requests.post(
-			"http://51.222.11.213:8080/char/list?g={}".format(self.email),
+			"https://valor-prod.realmdex.com/char/list?g={}".format(self.email),
 			headers = self.headers,
 			data = {
 				"guid" : self.email,
@@ -441,8 +436,6 @@ class Client:
 				"gameClientVersion" : self.buildVersion
 			}
 		).content.decode("utf-8")
-
-
 
 		try:
 			charID = int(re.findall("<char id=\"([0-9]+)\">", x, flags = re.I)[0])
@@ -457,7 +450,6 @@ class Client:
 		self.objectID = p.objectID
 		self.charID = p.charID
 		print("Connected to {}!".format(self.currentMap))
-
 
 	#########
 	# hooks #
@@ -485,6 +477,8 @@ class Client:
 			self.module = Notifier()
 		elif self.moduleName == "none":
 			self.module = AFK()
+		elif self.moduleName == "WZYBFIPQLMOH":
+			self.module = WZYBFIPQLMOH()
 
 		if self.module == None:
 			return False
