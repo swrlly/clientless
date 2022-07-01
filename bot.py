@@ -63,8 +63,9 @@ async def on_ready():
 async def on_member_update(before, after):
     return
 
-bot.loop.create_task(tracker())
-botThread = threading.Thread(target = bot.run, args = (TOKEN,), daemon = True)
-botThread.start()
+loop = asyncio.get_event_loop()
+loop.create_task(bot.start(TOKEN))
+loop.create_task(tracker())
+threading.Thread(target = loop.run_forever, daemon = True).start()
 print("Started discord bot thread.")
 client.mainLoop()
