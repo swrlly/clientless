@@ -15,8 +15,6 @@ from valorlib.Packets.Packet import *
 from valorlib.Packets.DataStructures import *	
 from valorlib.RC4 import RC4
 from queue import Queue
-# secret modules
-from WZYBFIPQLMOH import *
 from Notifier import *
 from AFK import *
 
